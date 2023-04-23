@@ -1,0 +1,3 @@
+torch
+safetensors
+git+https://github.com/diontimmer/DTGUILib.git
