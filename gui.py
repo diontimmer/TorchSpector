@@ -54,7 +54,6 @@ def remove_nested_key(obj, keys_to_remove):
             else:
                 remove_nested_key(obj[index], keys_to_remove[1:])
 
-
 def ratio_merge(model_paths, alphas=None, matchwords=None, device='cpu', roots=['state_dict']):
     gc.collect()
     empty_cache()
@@ -65,9 +64,7 @@ def ratio_merge(model_paths, alphas=None, matchwords=None, device='cpu', roots=[
         matchwords = []
 
     # Initialize merged model
-    for root in roots:
-        merged_model = {root: {}}
-
+    merged_model = {root: {} for root in roots}
     merged_initialized = False
 
     # Load and merge models
@@ -92,6 +89,7 @@ def ratio_merge(model_paths, alphas=None, matchwords=None, device='cpu', roots=[
         del model
 
     return merged_model
+
 
 
 
