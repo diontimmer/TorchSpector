@@ -54,20 +54,24 @@ def remove_nested_key(obj, keys_to_remove):
             else:
                 remove_nested_key(obj[index], keys_to_remove[1:])
 
-def ratio_merge(model_paths, alphas=None, matchwords=None, device='cpu', roots=['state_dict']):
+def ratio_merge(model_paths, alphas=None, base_model=None, matchwords=None, device='cpu', roots=['state_dict']):
     gc.collect()
     empty_cache()
+
+    print(alphas)
 
     if alphas is None:
         alphas = [1 / len(model_paths)] * len(model_paths)
     if matchwords is None:
         matchwords = []
 
-    # Initialize merged model
-    merged_model = {root: {} for root in roots}
-    merged_initialized = False
+    # Load base model
+    if base_model is not None:
+        merged_model = load_torch(base_model, map_location=device)
+    else:
+        raise ValueError("A base model must be provided.")
 
-    # Load and merge models
+    # Load and merge models iteratively
     for model_path, alpha in zip(model_paths, alphas):
         model = load_torch(model_path, map_location=device)
         roots = ['ALL'] if not roots else roots
@@ -78,13 +82,10 @@ def ratio_merge(model_paths, alphas=None, matchwords=None, device='cpu', roots=[
                 # Check if key matches any of the matchwords or if matchwords is empty
                 if any(matchword in key for matchword in matchwords) or not matchwords:
                     if key in insert:
-                        insert[key] += alpha * theta[key]
+                        insert[key] = (1 - alpha) * insert[key] + alpha * theta[key]
+                        dtu.log(f"\nKey {key} merged | (1 - {alpha}) * merge[{key}] + {alpha} * {os.path.basename(model_path)}[{key}]", lvl='info')
                     else:
-                        if not merged_initialized:
-                            dtu.log(f"Key {key} not found in merged model. Adding it now.", lvl='warning')
-                        insert[key] = alpha * theta[key]
-        if not merged_initialized:
-            merged_initialized = True
+                        dtu.log(f"\nKey {key} not found in merged model. Skipping.", lvl='warning')
 
         del model
 
@@ -92,15 +93,22 @@ def ratio_merge(model_paths, alphas=None, matchwords=None, device='cpu', roots=[
 
 
 
+def create_expandable_element(key, input_pth='', base=False):
+    if base:
+        return [
+            sg.Input(default_text=input_pth, key=f'base_model', size=(40, 1)),
+            sg.FileBrowse('Browse', key=f'base_model_btn', target=f'base_model'),
+            sg.Text('Base Model'),
+        ]
 
-def create_expandable_element(key, input_pth=''):
-    return [
-        sg.Input(default_text=(input_pth if key==0 else ''), key=f'ckpt_path_{key}', size=(40, 1), visible=(key == 0)),
-        sg.FileBrowse('Browse', key=f'ckpt_path_{key}_btn', target=f'ckpt_path_{key}', visible=(key == 0)),
-        sg.Text('Ratio:', key=f'ratio_text_{key}', visible=(key == 0)),
-        sg.Input('0.5', key=f'ratio_{key}', size=(5, 1), visible=(key == 0)),
-        sg.Button('+', key=f'add_{key}', visible=(key == 0))
-    ]
+    else:
+        return [
+            sg.Input(default_text='', key=f'ckpt_path_{key}', size=(40, 1), visible=(key == 0)),
+            sg.FileBrowse('Browse', key=f'ckpt_{key}_btn', target=f'ckpt_path_{key}', visible=(key == 0)),
+            sg.Text('Ratio:', key=f'ratio_text_{key}', visible=(key == 0)),
+            sg.Input('0.5', key=f'ratio_{key}', size=(5, 1), visible=(key == 0)),
+            sg.Button('+', key=f'add_{key}', visible=(key == 0))
+        ]
 
 def expand(i, window):
     window[f'add_{i}'].update(visible=False)
@@ -110,10 +118,13 @@ def expand(i, window):
     window[f'ratio_{i+1}'].update(visible=True)
     window[f'add_{i+1}'].update(visible=True) 
 
-def merger_popup(input_pth, main_window, loaded_dict):
+def merger_popup(input_pth, main_window):
+    global loaded_dict
     num_elements = 25
     layout = [
-        create_expandable_element(i, input_pth) for i in range(num_elements)
+        create_expandable_element('base_model', input_pth, base=True)
+    ] + [
+        create_expandable_element(i, '') for i in range(num_elements)
     ] + [
         dte.String_Setting(text='Matchwords (comma sep):', key='matchwords', default='main'),
         dte.String_Setting(text='Roots to process (comma sep):', key='roots', default='state_dict'),
@@ -122,7 +133,7 @@ def merger_popup(input_pth, main_window, loaded_dict):
     ]
     
     merge_window = sg.Window('Merger', layout, finalize=True)
-    expand(0, merge_window)
+    #expand(0, merge_window)
     
     while True:
         event, values = merge_window.read()
@@ -140,6 +151,7 @@ def merger_popup(input_pth, main_window, loaded_dict):
                 values = {k: v for k, v in values.items() if v != ''}
                 checkpoints = []
                 ratios = []
+                print(values)
                 for v in values.keys():
                     if v.startswith('ckpt_path_'):
                         checkpoints.append(values[v])
@@ -148,11 +160,15 @@ def merger_popup(input_pth, main_window, loaded_dict):
                 ratios = ratios[:len(checkpoints)]
                 matchwords = '' if 'matchwords' not in values else values['matchwords']
                 roots = '' if 'roots' not in values else values['roots']
-                merged = ratio_merge(checkpoints, ratios, matchwords.split(', '), values['device'], roots.split(', '))
-                fill_tree(merged)
                 merge_window.close()
+                merged = ratio_merge(checkpoints, ratios, values['base_model'], matchwords.split(', '), values['device'], roots.split(', '))
+                fill_tree(merged)
+                loaded_dict = merged
+                dtu.log(f"Successfully merged {len(checkpoints)} checkpoints.", lvl='success')
 
 loaded_dict = {}
+loaded_path = ''
+
 def get_supported_files():
     return (("Torch, Safetensors Files", "*.ckpt *.pt *.pth *.safetensors"),)
 
@@ -254,17 +270,17 @@ while True:
 
     if event == 'Merger':
         if loaded_dict:
-            merged = merger_popup(loaded_path, window, loaded_dict)
+            merged = merger_popup(loaded_path, window)
         else:
-            merged = merger_popup('', window, loaded_dict)
+            merged = merger_popup('', window)
 
 
 
     # if loaded
     if loaded_dict:
         if event == 'Save::-SAVE-':
-            input_filename = os.path.basename(loaded_path)
-            input_dirname = os.path.dirname(loaded_path)
+            input_filename = os.path.basename(loaded_path) if loaded_path else 'checkpoint.ckpt'
+            input_dirname = os.path.dirname(loaded_path) if loaded_path else ''
             if sg.running_mac():
                 save_file_name = sg.tk.filedialog.asksaveasfilename(defaultextension='.ckpt', initialdir=input_dirname, initialfile=input_filename)
             else:
